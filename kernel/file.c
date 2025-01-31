@@ -60,7 +60,7 @@ filedup(struct file *f)
 void
 fileclose(struct file *f)
 {
-  struct file ff;
+  //struct file ff; before changing to buddy allocator
 
   acquire(&ftable.lock);
   //changes for buddy allocator
