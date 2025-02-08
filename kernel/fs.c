@@ -208,6 +208,7 @@ ialloc(uint dev, short type)
       dip->type = type;
       log_write(bp);   // mark it allocated on the disk
       brelse(bp);
+      //printf("ialloc: allocated inode %d\n", inum); //lazy allocation, usertests
       return iget(dev, inum);
     }
     brelse(bp);
@@ -270,6 +271,7 @@ iget(uint dev, uint inum)
   ip->valid = 0;
   release(&icache.lock);
 
+  //printf("iget: retrieved inode %d\n", inum); //lazy allocation, usertests
   return ip;
 }
 
@@ -340,6 +342,7 @@ iput(struct inode *ip)
 
     // ip->ref == 1 means no other process can have ip locked,
     // so this acquiresleep() won't block (or deadlock).
+    //printf("iput: freeing inode %d\n", ip->inum);
     acquiresleep(&ip->lock);
 
     release(&icache.lock);
@@ -350,7 +353,7 @@ iput(struct inode *ip)
     ip->valid = 0;
 
     releasesleep(&ip->lock);
-
+    //printf("iput: decreased ref count of inode %d to %d\n", ip->inum, ip->ref);
     acquire(&icache.lock);
   }
 
@@ -419,6 +422,7 @@ itrunc(struct inode *ip)
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
+      //printf("itrunc: freeing block %d of inode %d\n", ip->addrs[i], ip->inum); //lazy allocation, usertests
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
@@ -428,8 +432,10 @@ itrunc(struct inode *ip)
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
     for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
+      if(a[j]){
+        //printf("itrunc: freeing indirect block %d of inode %d\n", a[j], ip->inum);
         bfree(ip->dev, a[j]);
+      }
     }
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
@@ -438,6 +444,7 @@ itrunc(struct inode *ip)
 
   ip->size = 0;
   iupdate(ip);
+  //printf("itrunc: truncated inode %d\n", ip->inum); //lazy allocation, usertests
 }
 
 // Copy stat information from inode.
@@ -572,9 +579,10 @@ dirlink(struct inode *dp, char *name, uint inum)
 
   strncpy(de.name, name, DIRSIZ);
   de.inum = inum;
-  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
+  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de)){
     panic("dirlink");
-
+  }
+  //printf("dirlink: linked inode %d to directory %s\n", inum, name);
   return 0;
 }
 

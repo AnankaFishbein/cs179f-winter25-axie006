@@ -79,7 +79,7 @@ static pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
   if(va >= MAXVA)
-    panic("walk");
+    panic("walk: va out of range");
 
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
@@ -110,6 +110,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if((*pte & PTE_V) == 0)
     return 0;
   if((*pte & PTE_U) == 0)
+    return 0;
+  if(va > MAXVA)
     return 0;
   pa = PTE2PA(*pte);
   return pa;
@@ -181,26 +183,47 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
   pte_t *pte;
   uint64 pa;
 
+  // Round down the starting virtual address to the nearest page boundary
   a = PGROUNDDOWN(va);
+ // Round down the ending virtual address to the nearest page boundary
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+    // Walk the page table to find the page table entry for the current address
+    if((pte = walk(pagetable, a, 0)) == 0){
+      // If the page table entry is not found, skip to the next page
+      //panic("uvmunmap: walk");
+      //Skip unmapped pages
+      if(a == last)
+        break;
+      a += PGSIZE;
+      continue;
+    }
+    // If the page table entry is not valid, skip to the next page
     if((*pte & PTE_V) == 0){
-      printf("va=%p pte=%p\n", a, *pte);
-      panic("uvmunmap: not mapped");
+      // If this is the last page, break out of the loop
+      //printf("va=%p pte=%p\n", a, *pte);
+      //panic("uvmunmap: not mapped");
+      // Skip unmapped pages for lazy allocation
+      if(a == last)
+        break;
+      a += PGSIZE;
+      continue;
     }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+    // If the page table entry is valid and do_free is set, free the physical memory
     if(do_free){
       pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
+    // Clear the page table entry
     *pte = 0;
+     // If this is the last page, break out of the loop
     if(a == last)
       break;
+    // Move to the next page
     a += PGSIZE;
-    pa += PGSIZE;
+    //pa += PGSIZE; //skip this page for lazy allocation
   }
 }
 
@@ -243,8 +266,11 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   if(newsz < oldsz)
     return oldsz;
 
+  // Round up the new size to a multiple of PGSIZE
   oldsz = PGROUNDUP(oldsz);
   a = oldsz;
+
+  
   for(; a < newsz; a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
@@ -270,9 +296,13 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
   if(newsz >= oldsz)
     return oldsz;
+
+  // Call uvmunmap to remove the mappings and free the memory
   uvmunmap(pagetable, newsz, oldsz - newsz, 1);
+
   return newsz;
 }
+
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
@@ -284,11 +314,15 @@ freewalk(pagetable_t pagetable)
     pte_t pte = pagetable[i];
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
-      uint64 child = PTE2PA(pte);
-      freewalk((pagetable_t)child);
-      pagetable[i] = 0;
-    } else if(pte & PTE_V){
-      panic("freewalk: leaf");
+      uint64 child = PTE2PA(pte);//get the physical address of the page table
+      freewalk((pagetable_t)child); //recursively free the page table
+      pagetable[i] = 0;// clear the PTE
+    } else if(pte & PTE_V){ //if the PTE is valid and points to a leaf page
+      //panic("freewalk: leaf");
+      // this PTE points to a leaf page.(for lazy allocation)
+      uint64 pa = PTE2PA(pte);//get the physical address of the leaf page
+      kfree((void*)pa);//free the physical memory of the leaf page
+      pagetable[i] = 0;//clear the PTE
     }
   }
   kfree((void*)pagetable);
@@ -318,15 +352,25 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
+    // Walk the old page table to find the page table entry for the current address
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      //panic("uvmcopy: pte should exist");
+      continue; //skip unmapped pages for lazy allocation
+    if((*pte & PTE_V) == 0){
+      //panic("uvmcopy: page not present");
+      // Skip unmapped pages for lazy allocation
+      continue;
+    }
+    // Get the physical address from the page table entry
     pa = PTE2PA(*pte);
+    // Get the flags from the page table entry
     flags = PTE_FLAGS(*pte);
+    // Allocate a new page of memory
     if((mem = kalloc()) == 0)
       goto err;
+    // Copy the contents of the old page to the new page
     memmove(mem, (char*)pa, PGSIZE);
+    // Map the new page into the new page table
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
       goto err;
@@ -335,6 +379,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return 0;
 
  err:
+  // Free any allocated pages on failure
   uvmunmap(new, 0, i, 1);
   return -1;
 }
@@ -362,12 +407,28 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = (uint)PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    pa0 = walkaddr(pagetable, va0); //get the physical address of the page
+                                      //changed from va0 to dstva
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+    
+    if(pa0 == 0){ //if 0 ->not mapped yet
+      // Allocate a new page
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE); //clear page to zero
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W | PTE_R | PTE_X | PTE_U) != 0){
+        kfree(mem);
+        return -1;
+      }
+      pa0 = (uint64)mem;
+    }
+    // if(pa0 != 0){
+    //    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    // }
+    
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -387,14 +448,27 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 
   while(len > 0){
     va0 = (uint)PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    pa0 = walkaddr(pagetable, va0); //changed from va0 to srcva
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
+    if(pa0 == 0){ //page not yet mapped
+      // Allocate a new page
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W | PTE_R | PTE_X | PTE_U) != 0){
+        kfree(mem);
+        return -1;
+      }
+      pa0 = (uint64)mem;
+    }
+    // if(pa0 != 0){
+    //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+    // }
+    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
     len -= n;
     dst += n;
     srcva = va0 + PGSIZE;
@@ -414,13 +488,27 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
   while(got_null == 0 && max > 0){
     va0 = (uint)PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    pa0 = walkaddr(pagetable, srcva); //changed from va0 to srcva
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
 
+    if(pa0 == 0){ //page not yet mapped
+      // Allocate a new page
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE); //set memory to zero
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W | PTE_R | PTE_X | PTE_U) != 0){
+        kfree(mem);
+        return -1;
+      }
+      pa0 = (uint64)mem;
+    }
+    // if(pa0 == 0){
+    //   return -1;
+    // }
+    
     char *p = (char *) (pa0 + (srcva - va0));
     while(n > 0){
       if(*p == '\0'){
@@ -434,8 +522,8 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
       --max;
       p++;
       dst++;
+    
     }
-
     srcva = va0 + PGSIZE;
   }
   if(got_null){

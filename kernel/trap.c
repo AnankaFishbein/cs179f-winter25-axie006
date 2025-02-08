@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+//#include "vm.c"
+//#include "buddy.c"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,7 +67,34 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } 
+  else if ((r_scause()) == 15 || (r_scause() == 13)) { // Load Page Fault or Store Page Fault
+  uint64 va = r_stval(); // Get the faulting virtual address
+  struct proc *p = myproc();
+  //printf("usertrap: page fault at va=%p, scause=%p\n", va, r_scause());
+
+  // Check if the faulting address is within the process's address space
+  if ((va >= p->sz) || (va >= MAXVA) || (va <= p->userstack)) { //checkif below the bottom of the stack
+    p->killed = 1;
+    goto end;
+  } else {
+    // Allocate a new page and map it to the faulting address
+    uint64 a = PGROUNDDOWN(va);
+    char *mem = kalloc();
+    if (mem == 0) {
+      p->killed = 1;
+      goto end;
+    } else {
+      memset(mem, 0, PGSIZE);
+      if (mappages(p->pagetable, a, PGSIZE, (uint64)mem, PTE_W | PTE_R | PTE_X | PTE_U) != 0) {
+        kfree(mem);
+        p->killed = 1;
+        goto end;
+      }
+    }
+  }
+}
+  else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
@@ -73,6 +102,7 @@ usertrap(void)
     p->killed = 1;
   }
 
+end:
   if(p->killed)
     exit(-1);
 

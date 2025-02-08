@@ -266,6 +266,7 @@ fork(void)
   np->sz = p->sz;
 
   np->parent = p;
+  np->userstack = p->userstack; //for lazy allocation
 
   // copy saved user registers.
   *(np->tf) = *(p->tf);

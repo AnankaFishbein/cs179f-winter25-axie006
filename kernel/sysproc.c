@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+//#include "vm.c"
 
 uint64
 sys_exit(void)
@@ -47,9 +48,13 @@ sys_sbrk(void)
   if(argint(0, &n) < 0)
     return -1;
   struct proc *p = myproc();
-  
+
   addr = p->sz;
   p->sz += n; // Increment process size for lazy allocation
+  if(n < 0){ //shrinking process size
+    uvmdealloc(p->pagetable, addr, p->sz);
+  }
+  
   printf("sys_sbrk: incrementing process size by %d, new size=%p\n", n, p->sz);
 
   return addr;
