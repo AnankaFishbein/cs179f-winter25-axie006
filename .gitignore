@@ -22,4 +22,4 @@ xv6.out*
 .vagrant/
 submissions/
 mycode.diff
-qemu_4.1.1.tar.xz
+qemu-4.1.1.tar.xz
