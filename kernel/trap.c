@@ -71,7 +71,12 @@ usertrap(void)
     uint64 start_va = PGROUNDDOWN(r_stval());
     pte_t *pte;
     pte = walk(p->pagetable, start_va, 0);
-    if (pte && (*pte & PTE_COW)) { // COW页触发写保护
+    if (pte == 0) {
+      printf("usertrap: page not found\n");
+      p->killed = 1;
+      exit(-1);
+    }
+    if (pte && (*pte & PTE_COW) && (*pte & PTE_V) && (*pte & PTE_U)) { // page is vaild, user accessible, and COW
       uint64 pa = PTE2PA(*pte);
       uint64 newpa = (uint64)kalloc();
       if (newpa == 0) panic("cow alloc failed");

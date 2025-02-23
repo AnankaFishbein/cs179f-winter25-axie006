@@ -2125,7 +2125,7 @@ main(int argc, char *argv[])
     char *s;
   } tests[] = {
     {reparent2, "reparent2"},
-    {pgbug, "pgbug" },
+    //{pgbug, "pgbug" }, //commented out (instructed by teacher in piazzia)
     {sbrkbugs, "sbrkbugs" },
     // {badwrite, "badwrite" },
     {badarg, "badarg" },

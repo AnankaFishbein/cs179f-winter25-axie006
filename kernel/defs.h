@@ -63,6 +63,7 @@ void*           kalloc(void);
 void            kfree(void *);
 void            kinit();
 void            incref(void* pa); // 新增
+void            decref(void* pa); // 新增
 
 // log.c
 void            initlog(int, struct superblock*);

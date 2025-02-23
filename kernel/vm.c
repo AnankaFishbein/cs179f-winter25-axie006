@@ -317,26 +317,52 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz) {
+  if (sz == 0)
+    return 0;  // Nothing to copy if size is zero
+
   pte_t *pte;
   uint64 pa;
   uint flags;
 
   for (uint64 i = 0; i < sz; i += PGSIZE) {
+    // 1. Get the PTE for the page
     if ((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte not found");
+      panic("uvmcopy: PTE not found");
     if ((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = (PTE_FLAGS(*pte) | PTE_COW) & ~PTE_W;
 
-    // 映射到子进程页表
+    // 2. Extract the physical address and flags
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+
+    // 3. Check if writable, mark as Copy-On-Write
+    if (flags & PTE_W) {
+      flags &= ~PTE_W;    // Remove write permission
+      flags |= PTE_COW;   // Set Copy-On-Write flag
+
+      // Mark parent page as COW as well
+      *pte = PA2PTE(pa) | flags;
+    }
+
+    // 4. Map into child page table with updated permissions
     if (mappages(new, i, PGSIZE, pa, flags) != 0) {
-      uvmunmap(new, 0, i / PGSIZE, 1); // 只解除已映射的页
+      // If mapping fails, clean up previously mapped pages
+      for (uint64 j = 0; j < i; j += PGSIZE) {
+        pte_t *child_pte = walk(new, j, 0);
+        if (child_pte && (*child_pte & PTE_V)) {
+          uint64 child_pa = PTE2PA(*child_pte);
+          uvmunmap(new, j, 1, 1);
+          decref((void*)child_pa);
+        }
+      }
       return -1;
     }
+
+    // 5. Increment the reference count of the physical page
     incref((void*)pa);
   }
-  return 0;
+
+  return 0;  // Success
 }
 
 

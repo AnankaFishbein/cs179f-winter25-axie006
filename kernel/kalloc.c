@@ -55,7 +55,8 @@ kfree(void *pa)
 
   int idx = ((uint64)pa - KERNBASE) / PGSIZE;
   acquire(&kmem.lock);
-  if (--kmem.refcount[idx] > 0) {
+
+  if ((--kmem.refcount[idx]) > 0) {
     release(&kmem.lock);
     return; // 引用未归零，不释放
   }
@@ -96,11 +97,62 @@ kalloc(void)
 void incref(void *pa) {
   if (((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("incref: invalid pa");
-  
+
   int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+
+  // Check for valid index range
+  if (idx < 0 || idx >= (PHYSTOP - KERNBASE) / PGSIZE)
+    panic("incref: index out of range");
+
   acquire(&kmem.lock);
+
+  // Check for invalid (negative) reference count before incrementing
+  if (kmem.refcount[idx] < 0) {
+    release(&kmem.lock);
+    panic("incref: negative refcount detected, possible memory corruption");
+  }
+
+  // Check for overflow
+  if (kmem.refcount[idx] == __INT_MAX__) {
+    release(&kmem.lock);
+    panic("incref: reference count overflow");
+  }
+
   kmem.refcount[idx]++;
-  printf("incref: pa=%p, ref=%d\n", pa, kmem.refcount[idx]); // 调试输出
+  //printf("incref: pa=%p, ref=%d\n", pa, kmem.refcount[idx]); // Debug output
   release(&kmem.lock);
 }
+
+
+void decref(void *pa) {
+  if (((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("decref: invalid pa");
+
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+
+  // Check for valid index range
+  if (idx < 0 || idx >= (PHYSTOP - KERNBASE) / PGSIZE)
+    panic("decref: index out of range");
+
+  acquire(&kmem.lock);
+
+  // Detect potential memory corruption
+  if (kmem.refcount[idx] <= 0) {
+    release(&kmem.lock);
+    panic("decref: reference count already zero or negative, memory corruption detected");
+  }
+
+  // Decrease the reference count
+  kmem.refcount[idx]--;
+  //printf("decref: pa=%p, ref=%d\n", pa, kmem.refcount[idx]); // Debug output
+
+  // Free the page if the reference count drops to zero
+  if (kmem.refcount[idx] == 0) {
+    release(&kmem.lock);
+    kfree(pa);
+  } else {
+    release(&kmem.lock);
+  }
+}
+
 
