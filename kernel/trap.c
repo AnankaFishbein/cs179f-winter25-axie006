@@ -65,7 +65,28 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } 
+
+  else if (r_scause() == 15) { // Store/AMO page fault
+    uint64 start_va = PGROUNDDOWN(r_stval());
+    pte_t *pte;
+    pte = walk(p->pagetable, start_va, 0);
+    if (pte && (*pte & PTE_COW)) { // COW页触发写保护
+      uint64 pa = PTE2PA(*pte);
+      uint64 newpa = (uint64)kalloc();
+      if (newpa == 0) panic("cow alloc failed");
+      memmove((void*)newpa, (void*)pa, PGSIZE); // 复制内容
+      kfree((void*)pa); // 减少原页引用计数
+      
+      // 更新PTE，恢复PTE_W并清除COW标志
+      *pte = PA2PTE(newpa) | ((PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW);
+      sfence_vma(); // 刷新TLB
+    } else {
+      p->killed = 1;
+    }
+  }
+
+  else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);

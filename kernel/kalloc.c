@@ -21,6 +21,7 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  int refcount[(PHYSTOP - KERNBASE) / PGSIZE]; // 引用计数数组
 } kmem;
 
 void
@@ -48,8 +49,17 @@ kfree(void *pa)
 {
   struct run *r;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if (((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP){
     panic("kfree");
+  }
+
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  acquire(&kmem.lock);
+  if (--kmem.refcount[idx] > 0) {
+    release(&kmem.lock);
+    return; // 引用未归零，不释放
+  }
+  release(&kmem.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -69,14 +79,28 @@ void *
 kalloc(void)
 {
   struct run *r;
-
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if (r) {
     kmem.freelist = r->next;
+    int idx = ((uint64)r - KERNBASE) / PGSIZE;
+    kmem.refcount[idx] = 1; // 初始化为1
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+void incref(void *pa) {
+  if (((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("incref: invalid pa");
+  
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  acquire(&kmem.lock);
+  kmem.refcount[idx]++;
+  printf("incref: pa=%p, ref=%d\n", pa, kmem.refcount[idx]); // 调试输出
+  release(&kmem.lock);
+}
+
