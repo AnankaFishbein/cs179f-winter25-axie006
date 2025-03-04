@@ -293,23 +293,29 @@ sys_symlink(void)
   struct inode *ip;
   int n;
 
-  if((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0)
+  // Fetch the arguments from user space
+  if((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0){
     return -1;
-
+  }
+  // Begin a file system operation
   begin_op(ROOTDEV);
 
+  // Create a new inode for the symbolic link
   if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
     end_op(ROOTDEV);
     return -1;
   }
 
+  // Write the target path into the inode
   if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)){
     iunlockput(ip);
     end_op(ROOTDEV);
     return -1;
   }
 
+  // Unlock and put the inode
   iunlockput(ip);
+  // End the file system operation
   end_op(ROOTDEV);
 
   return 0;
@@ -328,11 +334,14 @@ sys_open(void)
   struct inode *ip;
   int n, depth = 0;
 
-  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
+  // Fetch the arguments from user space
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0){
     return -1;
-
+  }
+  // Begin a file system operation
   begin_op(ROOTDEV);
 
+  // Handle O_CREATE flag
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
@@ -340,6 +349,7 @@ sys_open(void)
       return -1;
     }
   } else {
+    // Follow symbolic links unless O_NOFOLLOW is set
     while (1) {
       if((ip = namei(path)) == 0){
         end_op(ROOTDEV);
@@ -351,7 +361,7 @@ sys_open(void)
         break;
       }
 
-      if (++depth > 10) {
+      if (++depth > 10) { //harcode recursion limit of 10
         iunlockput(ip);
         end_op(ROOTDEV);
         return -1;
