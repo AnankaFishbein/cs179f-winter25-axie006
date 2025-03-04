@@ -284,20 +284,49 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
-sys_symlink(void)
+sys_symlink(void) 
 {
-  //your implementation goes here
+  /*lab 4: takes (char target, char path) 
+  and creates a symbolic link at path pointing to target
+  */
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  if((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op(ROOTDEV);
+
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op(ROOTDEV);
+    return -1;
+  }
+
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)){
+    iunlockput(ip);
+    end_op(ROOTDEV);
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op(ROOTDEV);
+
   return 0;
 }
+
 
 uint64
 sys_open(void)
 {
+  /*This function now handles symbolic links by following them recursively 
+  unless the O_NOFOLLOW flag is set. It also checks for cycles by limiting 
+  the depth of symbolic links to 10.*/
   char path[MAXPATH];
   int fd, omode;
   struct file *f;
   struct inode *ip;
-  int n;
+  int n, depth = 0;
 
   if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
@@ -311,11 +340,33 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op(ROOTDEV);
-      return -1;
+    while (1) {
+      if((ip = namei(path)) == 0){
+        end_op(ROOTDEV);
+        return -1;
+      }
+      ilock(ip);
+
+      if(ip->type != T_SYMLINK || (omode & O_NOFOLLOW)) {
+        break;
+      }
+
+      if (++depth > 10) {
+        iunlockput(ip);
+        end_op(ROOTDEV);
+        return -1;
+      }
+
+      char symlink_path[MAXPATH];
+      if(readi(ip, 0, (uint64)symlink_path, 0, MAXPATH) < 0){
+        iunlockput(ip);
+        end_op(ROOTDEV);
+        return -1;
+      }
+      iunlockput(ip);
+      safestrcpy(path, symlink_path, MAXPATH);
     }
-    ilock(ip);
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op(ROOTDEV);
