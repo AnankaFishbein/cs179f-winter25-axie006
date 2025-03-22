@@ -195,25 +195,25 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm,
       if (*pte & PTE_V) {
           if (allow_remap) {
               // 允许覆盖（例如COW场景）
-              printf("mappages: overwriting existing mapping "
-                     "va=0x%p old_pa=0x%p -> new_pa=0x%p\n", 
-                     a, PTE2PA(*pte), pa);
+              //printf("mappages: overwriting existing mapping "
+                     //"va=0x%p old_pa=0x%p -> new_pa=0x%p\n", 
+                   //  a, PTE2PA(*pte), pa);
           } else {
               // 不允许覆盖，触发错误
-              printf("mappages: remap detected at va=0x%p "
-                     "old_pa=0x%p new_pa=0x%p\n",
-                     a, PTE2PA(*pte), pa);
+              //printf("mappages: remap detected at va=0x%p "
+                     //"old_pa=0x%p new_pa=0x%p\n",
+                    // a, PTE2PA(*pte), pa);
               return -1;
           }
       }
 
       // 5. 设置页表项
       *pte = PA2PTE(pa) | perm | PTE_V;
-      printf("mappages: va=0x%p -> pa=0x%p perm=0x%x (R=%d W=%d X=%d)\n",
-             a, pa, perm, 
-             (perm & PTE_R) ? 1 : 0,
-             (perm & PTE_W) ? 1 : 0,
-             (perm & PTE_X) ? 1 : 0);
+      //printf("mappages: va=0x%p -> pa=0x%p perm=0x%x (R=%d W=%d X=%d)\n",
+             //a, pa, perm, 
+          //   (perm & PTE_R) ? 1 : 0,
+            // (perm & PTE_W) ? 1 : 0,
+           //  (perm & PTE_X) ? 1 : 0);
 
       // 6. 终止条件
       if (a == last)
