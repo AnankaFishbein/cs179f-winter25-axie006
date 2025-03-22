@@ -1,3 +1,5 @@
+#ifndef __SPINLOCK_H__
+#define __SPINLOCK_H__
 // Mutual exclusion lock.
 struct spinlock {
   uint locked;       // Is the lock held?
@@ -9,3 +11,4 @@ struct spinlock {
   uint nts;
 };
 
+#endif //__SPINKLOCK_H__

@@ -121,7 +121,7 @@ panic(char *s)
   printf("PANIC: ");
   printf(s);
   printf("\n");
-  printf("HINT: restart xv6 using 'make qemu-gdb', type 'b panic' (to set breakpoint in panic) in the gdb window, followed by 'c' (continue), and when the kernel hits the breakpoint, type 'bt' to get a backtrace\n");
+  //printf("HINT: restart xv6 using 'make qemu-gdb', type 'b panic' (to set breakpoint in panic) in the gdb window, followed by 'c' (continue), and when the kernel hits the breakpoint, type 'bt' to get a backtrace\n");
   panicked = 1; // freeze other CPUs
   for(;;)
     ;

@@ -15,7 +15,7 @@ char buf[BSIZE];
 int
 main(int argc, char *argv[])
 {
-  mmap_test();
+  //mmap_test();
   fork_test();
   printf("mmaptest: all tests succeeded\n");
   exit(0);

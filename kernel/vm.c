@@ -5,6 +5,9 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "proc.h"
+#include "spinlock.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -25,10 +28,10 @@ void print(pagetable_t);
 void
 kvminit()
 {
-  kernel_pagetable = (pagetable_t) kalloc();
+  kernel_pagetable = (pagetable_t)kalloc();
   memset(kernel_pagetable, 0, PGSIZE);
 
-  // uart registers
+  // UART 设备物理地址 0x10000000 是合法的
   kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface 0
@@ -75,7 +78,7 @@ kvminithart()
 //   21..39 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..12 -- 12 bits of byte offset within the page.
-static pte_t *
+ pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
   if(va >= MAXVA)
@@ -124,7 +127,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
 void
 kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 {
-  if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
+  if(mappages(kernel_pagetable, va, sz, pa, perm, 0) != 0)
     panic("kvmmap");
 }
 
@@ -148,64 +151,101 @@ kvmpa(uint64 va)
   return pa+off;
 }
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa. va and size might not
-// be page-aligned. Returns 0 on success, -1 if walk() couldn't
-// allocate a needed page-table page.
-int
-mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
-{
+// kernel/vm.c
+
+/**
+ * @brief 创建虚拟地址到物理地址的映射（支持覆盖现有映射）
+ * 
+ * @param pagetable 页表指针
+ * @param va 起始虚拟地址（不需要页对齐）
+ * @param size 映射的字节数
+ * @param pa 起始物理地址（必须页对齐）
+ * @param perm 权限标志（PTE_R/W/X/U/V）
+ * @param allow_remap 是否允许覆盖现有映射（用于COW等场景）
+ * @return int 成功返回0，失败返回-1
+ */
+int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm, int allow_remap) {
   uint64 a, last;
   pte_t *pte;
+  
+     // 仅对用户页表检查物理地址范围
+     if (pagetable != kernel_pagetable) {
+      if (pa < KERNBASE || pa >= PHYSTOP) {
+          printf("mappages: invalid user pa=0x%p\n", pa);
+          return -1;
+      }
+  }
 
+  // 1. 参数校验
+  if (va >= MAXVA || pa >= MAXVA)
+      panic("mappages: va or pa exceeds MAXVA");
+  
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
-  for(;;){
-    if((pte = walk(pagetable, a, 1)) == 0)
-      return -1;
-    if(*pte & PTE_V)
-      panic("remap");
-    *pte = PA2PTE(pa) | perm | PTE_V;
-    if(a == last)
-      break;
-    a += PGSIZE;
-    pa += PGSIZE;
+  pa = PGROUNDDOWN(pa); // 确保物理地址按页对齐
+
+  // 2. 遍历虚拟地址范围
+  for (;;) {
+      // 3. 获取页表项
+      if ((pte = walk(pagetable, a, 1)) == 0) {
+          printf("mappages: walk failed at va=0x%p\n", a);
+          return -1; // 无法分配中间页表页
+      }
+
+      // 4. 检查是否已存在有效映射
+      if (*pte & PTE_V) {
+          if (allow_remap) {
+              // 允许覆盖（例如COW场景）
+              *pte = PA2PTE(pa) | (perm & ~PTE_W) | PTE_COW | PTE_V; // 标记 COW 页
+              krefinc((void*)pa); // 增加引用计数
+              printf("mappages: overwriting existing mapping "
+                     "va=0x%p old_pa=0x%p -> new_pa=0x%p\n", 
+                     a, PTE2PA(*pte), pa);
+          } else {
+              // 不允许覆盖，触发错误
+              *pte = PA2PTE(pa) | perm | PTE_V;
+              printf("mappages: remap detected at va=0x%p "
+                     "old_pa=0x%p new_pa=0x%p\n",
+                     a, PTE2PA(*pte), pa);
+              return -1;
+          }
+      }
+
+      // 5. 设置页表项
+      *pte = PA2PTE(pa) | perm | PTE_V;
+      printf("mappages: va=0x%p -> pa=0x%p perm=0x%x (R=%d W=%d X=%d)\n",
+             a, pa, perm, 
+             (perm & PTE_R) ? 1 : 0,
+             (perm & PTE_W) ? 1 : 0,
+             (perm & PTE_X) ? 1 : 0);
+
+      // 6. 终止条件
+      if (a == last)
+          break;
+      
+      // 7. 移动到下一页
+      a += PGSIZE;
+      pa += PGSIZE;
   }
   return 0;
 }
 
-// Remove mappings from a page table. The mappings in
-// the given range must exist. Optionally free the
-// physical memory.
-void
-uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
-{
-  uint64 a, last;
-  pte_t *pte;
-  uint64 pa;
 
-  a = PGROUNDDOWN(va);
-  last = PGROUNDDOWN(va + size - 1);
-  for(;;){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0){
-      printf("va=%p pte=%p\n", a, *pte);
-      panic("uvmunmap: not mapped");
+// vm.c
+void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
+  for (uint64 a = va; a < va + npages * PGSIZE; a += PGSIZE) {
+    pte_t *pte = walk(pagetable, a, 0);
+    if (!pte || !(*pte & PTE_V)) {
+      continue; // 跳过无效页表项，避免 panic
     }
-    if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
-    if(do_free){
-      pa = PTE2PA(*pte);
+    if (do_free) {
+      uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
     *pte = 0;
-    if(a == last)
-      break;
-    a += PGSIZE;
-    pa += PGSIZE;
   }
 }
+
 
 // create an empty user page table.
 pagetable_t
@@ -231,7 +271,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
     panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
-  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
+  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U, 0);
   memmove(mem, src, sz);
 }
 
@@ -255,7 +295,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       return 0;
     }
     memset(mem, 0, PGSIZE);
-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U, 0) != 0){
       kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
@@ -310,41 +350,49 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+// vm.c
+
+// 检查虚拟地址是否属于私有映射（MAP_PRIVATE）
+int 
+is_private_mapping(pagetable_t pagetable, uint64 va) 
+{
+  struct proc *p = myproc();
+  
+  // 遍历 VMA 检查地址是否属于私有映射
+  for (int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->valid && va >= v->addr && va < v->addr + v->length) {
+      return (v->flags == MAP_PRIVATE);
+    }
+  }
+  return 0; // 不属于任何 VMA 或不是私有映射
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
-int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
-{
-  pte_t *pte;
-  uint64 pa, i;
-  uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz) {
+  for (uint64 i = 0; i < sz; i += PGSIZE) {
+    pte_t *pte = walk(old, i, 0);
+    if (!pte || !(*pte & PTE_V)) continue;
+    
+    // 对私有映射标记 COW
+    if (is_private_mapping(old, i)) { 
+      *pte &= ~PTE_W;
+      *pte |= PTE_COW;
+      krefinc((void*)PTE2PA(*pte)); // 增加引用计数
     }
+    
+    // 复制页表项到子进程
+    mappages(new, i, PGSIZE, PTE2PA(*pte), PTE_FLAGS(*pte), 1);
   }
   return 0;
-
- err:
-  uvmunmap(new, 0, i, 1);
-  return -1;
 }
+
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.

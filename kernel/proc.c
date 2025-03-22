@@ -8,6 +8,8 @@
 #include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include <stddef.h>
+
 
 struct cpu cpus[NCPU];
 
@@ -163,11 +165,11 @@ proc_pagetable(struct proc *p)
   // only the supervisor uses it, on the way
   // to/from user space, so not PTE_U.
   mappages(pagetable, TRAMPOLINE, PGSIZE,
-           (uint64)trampoline, PTE_R | PTE_X);
+           (uint64)trampoline, PTE_R | PTE_X, 0);
 
   // map the trapframe just below TRAMPOLINE, for trampoline.S.
   mappages(pagetable, TRAPFRAME, PGSIZE,
-           (uint64)(p->tf), PTE_R | PTE_W);
+           (uint64)(p->tf), PTE_R | PTE_W, 0);
 
   return pagetable;
 }
@@ -207,11 +209,12 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
-  p->sz = PGSIZE;
+  // 初始堆顶设置在 TRAPFRAME 下方 16KB（4页）
+  p->sz = TRAPFRAME - 4 * PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
   p->tf->epc = 0;      // user program counter
-  p->tf->sp = PGSIZE;  // user stack pointer
+  p->tf->sp = TRAPFRAME - PGSIZE; // 栈顶位于 guard page 上方一页
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
@@ -277,6 +280,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 复制 VMA
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid) {
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].file = filedup(p->vmas[i].file); // 增加文件引用计数
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -322,9 +333,9 @@ exit(int status)
 {
   struct proc *p = myproc();
 
-  if(p == initproc)
+  if(p == initproc){
     panic("init exiting");
-
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -374,6 +385,15 @@ exit(int status)
   p->state = ZOMBIE;
 
   release(&original_parent->lock);
+
+  for (int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->valid) {
+      uvmunmap(p->pagetable, v->addr, v->length, 1);
+      fileclose(v->file);
+      v->valid = 0;
+    }
+  }
 
   // Jump into the scheduler, never to return.
   sched();

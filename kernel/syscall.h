@@ -25,4 +25,3 @@
 #define SYS_ntas   22
 #define SYS_mmap   23
 #define SYS_munmap 24
-

@@ -1,3 +1,7 @@
+#include "spinlock.h"
+
+#ifndef PROC_H
+#define PROC_H
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -80,6 +84,20 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+// 定义 VMA 结构
+#define NVMA 16  // 每个进程最多支持 16 个 VMA
+
+struct vma {
+  uint64 addr;      // 起始虚拟地址
+  uint64 length;    // 映射长度
+  int prot;         // 权限（PROT_READ/PROT_WRITE）
+  int flags;        // 标志（MAP_SHARED/MAP_PRIVATE）
+  struct file *file; // 关联的文件指针
+  uint64 offset;    // 文件偏移量（始终为 0）
+  uint8 valid;      // 有效性标记（1=有效，0=无效）
+  int vma_idx;      // VMA 索引
+};
+
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -93,6 +111,8 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  struct vma vmas[NVMA];       // VMA 数组，固定大小 16
+  uint64 next_free_va;         // 下一个可分配的虚拟地址（用于 mmap 地址分配
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
@@ -103,4 +123,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  
 };
+
+#endif // PROC_H

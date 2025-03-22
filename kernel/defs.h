@@ -34,6 +34,10 @@ int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
 
+// sysfile.c 
+uint64          sys_mmap(void);
+uint64          sys_munmap(void);
+
 // fs.c
 void            fsinit(int);
 int             dirlink(struct inode*, char*, uint);
@@ -158,7 +162,7 @@ void            kvminit(void);
 void            kvminithart(void);
 uint64          kvmpa(uint64);
 void            kvmmap(uint64, uint64, uint64, int);
-int             mappages(pagetable_t, uint64, uint64, uint64, int);
+int             mappages(pagetable_t, uint64, uint64, uint64, int, int);
 pagetable_t     uvmcreate(void);
 void            uvminit(pagetable_t, uchar *, uint);
 uint64          uvmalloc(pagetable_t, uint64, uint64);
@@ -206,3 +210,10 @@ void lst_push(struct list*, void *);
 void *lst_pop(struct list*);
 void lst_print(struct list*);
 int lst_empty(struct list*);
+
+// lab 5
+int handle_mmap_fault(struct proc *, uint64 );
+int is_region_free(struct proc *, uint64 , uint64 );
+pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
+void krefinc(void *pa);
+int  is_private_mapping(pagetable_t pagetable, uint64 va);

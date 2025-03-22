@@ -18,14 +18,15 @@ struct run {
   struct run *next;
 };
 
-struct {
+struct kmem {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+};
 
 void
 kinit()
 {
+  struct kmem kmem;
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
@@ -39,23 +40,61 @@ freerange(void *pa_start, void *pa_end)
     kfree(p);
 }
 
+struct {
+  struct spinlock lock;
+  struct run *freelist;
+  uint refcount[(PHYSTOP - KERNBASE) / PGSIZE]; 
+} kmem;
+
+
+// 增加物理页的引用计数
+void 
+krefinc(void *pa) 
+{
+  if (((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("krefinc: invalid pa");
+
+  acquire(&kmem.lock);
+  uint idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  kmem.refcount[idx]++;
+  release(&kmem.lock);
+}
+
 // Free the page of physical memory pointed at by v,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
-void
+
+// Free a page of physical memory, managing reference counts
+void 
 kfree(void *pa)
 {
   struct run *r;
 
+  // 检查物理地址合法性
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
-    panic("kfree");
+    panic("kfree: invalid pa");
 
-  // Fill with junk to catch dangling refs.
+  // 减少引用计数
+  acquire(&kmem.lock);
+  uint idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  if (kmem.refcount[idx] == 0)
+    panic("kfree: refcount underflow");
+  
+  kmem.refcount[idx]--; // 引用计数减一
+  
+  // 如果引用计数仍大于0，不释放物理页
+  if (kmem.refcount[idx] > 0) {
+    release(&kmem.lock);
+    return;
+  }
+  release(&kmem.lock);
+
+  // 填充垃圾数据以检测悬垂指针
   memset(pa, 1, PGSIZE);
 
+  // 将物理页归还空闲链表
   r = (struct run*)pa;
-
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
@@ -69,14 +108,11 @@ void *
 kalloc(void)
 {
   struct run *r;
-
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
-
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+    acquire(&kmem.lock);
+    r = kmem.freelist;
+    if(r) {
+      kmem.refcount[((uint64)r - KERNBASE) / PGSIZE] = 1; // 初始化引用计数
+      memset((char*)r, 0, PGSIZE);
+    }
+    return (void*)r;
 }

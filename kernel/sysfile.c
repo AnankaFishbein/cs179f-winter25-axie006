@@ -15,6 +15,8 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
+#include <stddef.h>
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -483,10 +485,201 @@ sys_pipe(void)
   return 0;
 }
 
-uint64 sys_mmap (void){
-  return -1;
+// // kernel/sysfile.c
+// uint64 
+// sys_mmap(void) {
+//   uint64 addr;
+//   int length;
+//   int prot, flags, fd;
+//   int offset;
+
+//   // 参数解析（修复类型匹配问题）
+//   if (argaddr(0, &addr) < 0 || 
+//       argaddr(1, (uint64*)&length) < 0 || 
+//       argint(2, &prot) < 0 || 
+//       argint(3, &flags) < 0 || 
+//       argint(4, &fd) < 0 || 
+//       argint(5, (int*)&offset) < 0) {
+//     return -1;
+//   }
+
+//   // 校验参数合法性（根据题目要求）
+//   if (addr != 0 || offset != 0) return -1;  // 仅支持 addr=0 和 offset=0
+//   if (fd < 0 || fd >= NOFILE) return -1;    // 文件描述符有效性检查
+
+//   struct proc *p = myproc();
+//   struct file *f = p->ofile[fd];
+//   if (f == 0) return -1;
+
+//   // 检查权限（PROT_READ/PROT_WRITE 是否与文件模式匹配）
+//   if ((prot & PROT_READ) && !f->readable) return -1;
+//   if ((prot & PROT_WRITE) && !f->writable && flags == MAP_SHARED) return -1;
+
+//   // 查找空闲 VMA 条目
+//   int vma_idx = -1;
+//   for (int i = 0; i < NVMA; i++) {
+//     if (!p->vmas[i].valid) {
+//       vma_idx = i;
+//       break;
+//     }
+//   }
+//   if (vma_idx == -1) return -1;  // VMA 已满
+
+//   // 分配虚拟地址空间（从用户地址空间顶部向下分配）
+//   // 假设用户空间布局：text | data | heap | stack | mmap 区域（从高地址向下）
+//   uint64 start_va = p->sz;  // 当前进程的 sz 字段表示未分配的地址
+//   p->sz += length;          // 更新进程的虚拟地址空间大小
+
+//   // 初始化 VMA
+//   p->vmas[vma_idx].addr = start_va;
+//   p->vmas[vma_idx].length = length;
+//   p->vmas[vma_idx].prot = prot;
+//   p->vmas[vma_idx].flags = flags;
+//   p->vmas[vma_idx].file = filedup(f);  // 增加文件引用计数
+//   p->vmas[vma_idx].offset = 0;
+//   p->vmas[vma_idx].valid = 1;
+
+//   return start_va;  // 返回映射的虚拟地址
+// }
+
+// uint64 
+// sys_munmap(void) {
+//   uint64 addr;
+//   unsigned int length;
+//   argaddr(0, &addr);
+//   argaddr(1, (uint64*)&length);
+  
+//   struct proc *p = myproc();
+//   for (int i = 0; i < NVMA; i++) {
+//     struct vma *vma = &p->vmas[i];
+//     if (vma->valid && addr == vma->addr && length == vma->length) {
+//       // 完整解除映射
+//       if (vma->flags == MAP_SHARED) {
+//         // 写回脏页（简化：遍历所有页并写回）
+//         for (uint64 va = vma->addr; va < vma->addr + vma->length; va += PGSIZE) {
+//           if (walkaddr(p->pagetable, va)) {
+//             filewrite(vma->file, va, PGSIZE);
+//           }
+//         }
+//       }
+//       // 释放物理页和页表项
+//       uvmunmap(p->pagetable, vma->addr, vma->length / PGSIZE, 1);
+//       fileclose(vma->file);
+//       vma->valid = 0;
+//       return 0;
+//     }
+//   }
+//   return -1;
+// }
+
+uint64 sys_mmap(void) {
+  uint64 addr, length;
+  int prot, flags, fd;
+  struct file *f;
+  struct proc *p = myproc();
+
+  // 参数解析
+  if (argaddr(0, &addr) || argaddr(1, &length) || 
+      argint(2, &prot) || argint(3, &flags) || 
+      argfd(4, &fd, &f)) 
+    return -1;
+
+  // 参数校验
+  if (addr != 0) return -1; // 仅支持内核选择地址
+  if (length <= 0 || (prot & ~(PROT_READ | PROT_WRITE)) || 
+      (flags & ~(MAP_SHARED | MAP_PRIVATE))) 
+    return -1;
+
+  // 检查文件权限
+  if ((flags == MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+
+  // 查找空闲 VMA 条目
+  struct vma *vma = 0;
+  for (int i = 0; i < NVMA; i++) {
+    if (!p->vmas[i].valid) {
+      vma = &p->vmas[i];
+      break;
+    }
+  }
+  if (!vma) return -1;
+
+  // sysfile.c (sys_mmap)
+uint64 start_va = p->sz;
+uint64 end_va = PGROUNDUP(start_va + length);
+
+// 检查地址是否超过用户空间上限
+if (end_va >= TRAPFRAME) {
+    p->killed = 1;
+    return -1;
 }
 
-uint64 sys_munmap (void){
-  return -1;
+  // 初始化 VMA
+  vma->addr = start_va;
+  vma->length = end_va - start_va;
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->file = filedup(f); // 增加文件引用计数
+  vma->offset = 0;
+  vma->valid = 1;
+
+  // 更新进程堆顶
+  p->sz = end_va;
+
+  // 设置页表权限（延迟分配，仅设置虚拟地址范围）
+  // 实际物理页在 Page Fault 时分配
+  return start_va;
+}
+
+// sysfile.c
+uint64 sys_munmap(void) {
+  uint64 addr;
+  uint64 length;
+  if (argaddr(0, &addr) || argaddr(1, &length))
+    return -1;
+
+  struct proc *p = myproc();
+  struct vma *vma = 0;
+
+  // 查找匹配的VMA
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid && p->vmas[i].addr == addr && p->vmas[i].length == length) {
+      vma = &p->vmas[i];
+      break;
+    }
+  }
+  if (!vma) return -1;
+
+  // 写回MAP_SHARED的修改
+  if (vma->flags & MAP_SHARED) {
+    for (uint64 off = 0; off < vma->length; off += PGSIZE) {
+      uint64 va = vma->addr + off;
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if (pte && (*pte & PTE_V)) {
+        uint64 pa = PTE2PA(*pte);
+        ilock(vma->file->ip);
+        writei(vma->file->ip, 0, pa, off, PGSIZE);
+        iunlock(vma->file->ip);
+      }
+    }
+  }
+
+  // 解除映射并释放物理页
+  // sysfile.c (sys_munmap)
+  uint64 npages = PGROUNDUP(vma->length) / PGSIZE; // 确保页数对齐
+  uvmunmap(p->pagetable, vma->addr, npages, 1);
+  fileclose(vma->file);
+  vma->valid = 0;
+
+  return 0;
+}
+
+int is_region_free(struct proc *p, uint64 start, uint64 end) {
+  for (int i = 0; i < NVMA; i++) {
+      struct vma *v = &p->vmas[i];
+      if (v->valid && !(end <= v->addr || start >= v->addr + v->length)) {
+          return 0; // 区域重叠
+      }
+  }
+  return 1; // 区域空闲
 }
