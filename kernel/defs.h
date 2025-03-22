@@ -215,5 +215,3 @@ int lst_empty(struct list*);
 int handle_mmap_fault(struct proc *, uint64 );
 int is_region_free(struct proc *, uint64 , uint64 );
 pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
-void krefinc(void *pa);
-int  is_private_mapping(pagetable_t pagetable, uint64 va);

@@ -573,106 +573,146 @@ sys_pipe(void)
 // }
 
 uint64 sys_mmap(void) {
-  uint64 addr, length;
+  uint64 addr;
+  unsigned int length;
   int prot, flags, fd;
-  struct file *f;
-  struct proc *p = myproc();
+  unsigned int offset;
 
-  // 参数解析
-  if (argaddr(0, &addr) || argaddr(1, &length) || 
-      argint(2, &prot) || argint(3, &flags) || 
-      argfd(4, &fd, &f)) 
-    return -1;
+  // 解析参数
+  if (argaddr(0, &addr) < 0 || 
+      argint(1, (int*)&length) < 0 || 
+      argint(2, &prot) < 0 || 
+      argint(3, &flags) < 0 || 
+      argint(4, &fd) < 0 || 
+      argint(5, (int*)&offset) < 0) {
+      return -1;
+  }
 
   // 参数校验
-  if (addr != 0) return -1; // 仅支持内核选择地址
-  if (length <= 0 || (prot & ~(PROT_READ | PROT_WRITE)) || 
-      (flags & ~(MAP_SHARED | MAP_PRIVATE))) 
-    return -1;
-
-  // 检查文件权限
-  if ((flags == MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
-    return -1;
-
-  // 查找空闲 VMA 条目
-  struct vma *vma = 0;
-  for (int i = 0; i < NVMA; i++) {
-    if (!p->vmas[i].valid) {
-      vma = &p->vmas[i];
-      break;
-    }
-  }
-  if (!vma) return -1;
-
-  // sysfile.c (sys_mmap)
-uint64 start_va = p->sz;
-uint64 end_va = PGROUNDUP(start_va + length);
-
-// 检查地址是否超过用户空间上限
-if (end_va >= TRAPFRAME) {
-    p->killed = 1;
-    return -1;
-}
-
-  // 初始化 VMA
-  vma->addr = start_va;
-  vma->length = end_va - start_va;
-  vma->prot = prot;
-  vma->flags = flags;
-  vma->file = filedup(f); // 增加文件引用计数
-  vma->offset = 0;
-  vma->valid = 1;
-
-  // 更新进程堆顶
-  p->sz = end_va;
-
-  // 设置页表权限（延迟分配，仅设置虚拟地址范围）
-  // 实际物理页在 Page Fault 时分配
-  return start_va;
-}
-
-// sysfile.c
-uint64 sys_munmap(void) {
-  uint64 addr;
-  uint64 length;
-  if (argaddr(0, &addr) || argaddr(1, &length))
-    return -1;
+  if (addr != 0 || offset != 0) return -1;
+  if (fd < 0 || fd >= NOFILE) return -1;
+  if (length == 0 || length > MAXVA - TRAPFRAME) return -1;
 
   struct proc *p = myproc();
-  struct vma *vma = 0;
+  struct file *f = p->ofile[fd];
+  if (!f) return -1;
 
-  // 查找匹配的VMA
+  // 检查权限（例如：MAP_SHARED + 可写需要文件可写）
+  if ((flags == MAP_SHARED) && (prot & PROT_WRITE) && !f->writable) {
+      return -1;
+  }
+
+  // 查找空闲 VMA 条目
+  int vma_idx = -1;
   for (int i = 0; i < NVMA; i++) {
-    if (p->vmas[i].valid && p->vmas[i].addr == addr && p->vmas[i].length == length) {
-      vma = &p->vmas[i];
-      break;
-    }
-  }
-  if (!vma) return -1;
-
-  // 写回MAP_SHARED的修改
-  if (vma->flags & MAP_SHARED) {
-    for (uint64 off = 0; off < vma->length; off += PGSIZE) {
-      uint64 va = vma->addr + off;
-      pte_t *pte = walk(p->pagetable, va, 0);
-      if (pte && (*pte & PTE_V)) {
-        uint64 pa = PTE2PA(*pte);
-        ilock(vma->file->ip);
-        writei(vma->file->ip, 0, pa, off, PGSIZE);
-        iunlock(vma->file->ip);
+      if (!p->vmas[i].valid) {
+          vma_idx = i;
+          break;
       }
-    }
   }
+  if (vma_idx == -1) return -1;
 
-  // 解除映射并释放物理页
-  // sysfile.c (sys_munmap)
-  uint64 npages = PGROUNDUP(vma->length) / PGSIZE; // 确保页数对齐
-  uvmunmap(p->pagetable, vma->addr, npages, 1);
-  fileclose(vma->file);
-  vma->valid = 0;
+  // 计算起始地址和结束地址（向低地址分配）
+  uint64 start_va = PGROUNDUP(p->sz); // 起始地址按页对齐
+  uint64 end_va = PGROUNDUP(start_va + length); // 结束地址为当前堆顶
 
-  return 0;
+  // 检查请求长度是否合法
+  if (length == 0 || length >= TRAPFRAME - start_va) {
+    printf("mmap: invalid length=0x%lx\n", (uint64)length);
+    return -1;
 }
+
+// 检查是否侵入 TRAPFRAME 区域
+if (end_va >= TRAPFRAME) {
+    printf("mmap: end_va=0x%p >= TRAPFRAME=0x%p\n", (void*)start_va, (void*)TRAPFRAME);
+    return -1;
+}
+
+// 检查是否侵入底线
+uint64 bottom_guard = PGROUNDDOWN(p->tf->sp) + PGSIZE;
+if (start_va <= bottom_guard) {
+    printf("mmap: start_va=0x%p <= Bottom-Guard=0x%p (sp=0x%lx)\n", end_va, bottom_guard, p->tf->sp);
+    return -1;
+}
+
+  // 更新堆顶指针
+  p->sz = end_va;
+
+  // 初始化 VMA
+    p->vmas[vma_idx] = (struct vma){
+      .addr = start_va,
+      .length = end_va - start_va,
+      .prot = prot,
+      .flags = flags,
+      .file = filedup(f),
+      .offset = 0,
+      .valid = 1
+  };
+
+  return end_va; //start_va?
+}
+
+
+uint64 sys_munmap(void) {
+    uint64 addr;
+    unsigned int length;
+
+    if (argaddr(0, &addr) < 0 || argaddr(1, (uint64*)&length) < 0) return -1;
+    if (addr % PGSIZE != 0 || length % PGSIZE != 0) return -1;
+
+    struct proc *p = myproc();
+
+    // 1. 查找匹配的 VMA
+    struct vma *target_vma = NULL; //nullptr
+    for (int i = 0; i < NVMA; i++) {
+        struct vma *v = &p->vmas[i];
+        if (v->valid && addr >= v->addr && (addr + length) <= (v->addr + v->length)) {
+            target_vma = v;
+            break;
+        }
+    }
+    if (!target_vma) return -1;
+
+    // 2. 禁止解除映射到 trapframe
+    if (addr + length >= TRAPFRAME) {
+        printf("munmap: cannot unmap into trapframe\n");
+        return -1;
+    }
+
+    // 3. 写回脏页（MAP_SHARED）
+    if (target_vma->flags == MAP_SHARED) {
+        for (uint64 va = addr; va < addr + length; va += PGSIZE) {
+            pte_t *pte = walk(p->pagetable, va, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_D)) {
+                uint64 pa = PTE2PA(*pte);
+                begin_op(ROOTDEV);
+                ilock(target_vma->file->ip);
+                writei(target_vma->file->ip, 1, pa, va - target_vma->addr, PGSIZE);
+                iunlock(target_vma->file->ip);
+                end_op(ROOTDEV);
+            }
+        }
+    }
+
+    // 4. 解除页表映射
+    uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+
+    // 5. 更新 VMA 或标记为无效
+    if (addr == target_vma->addr && length == target_vma->length) {
+        fileclose(target_vma->file);
+        target_vma->valid = 0;
+    } else if (addr == target_vma->addr) {
+        target_vma->addr += length;
+        target_vma->length -= length;
+    } else if (addr + length == target_vma->addr + target_vma->length) {
+        target_vma->length -= length;
+    } else {
+        panic("munmap: partial unmap not supported");
+    }
+
+    return 0;
+}
+
 
 int is_region_free(struct proc *p, uint64 start, uint64 end) {
   for (int i = 0; i < NVMA; i++) {

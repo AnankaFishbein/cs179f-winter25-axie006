@@ -7,7 +7,6 @@
 #include "fs.h"
 #include "proc.h"
 #include "spinlock.h"
-#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -196,14 +195,11 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm,
       if (*pte & PTE_V) {
           if (allow_remap) {
               // 允许覆盖（例如COW场景）
-              *pte = PA2PTE(pa) | (perm & ~PTE_W) | PTE_COW | PTE_V; // 标记 COW 页
-              krefinc((void*)pa); // 增加引用计数
               printf("mappages: overwriting existing mapping "
                      "va=0x%p old_pa=0x%p -> new_pa=0x%p\n", 
                      a, PTE2PA(*pte), pa);
           } else {
               // 不允许覆盖，触发错误
-              *pte = PA2PTE(pa) | perm | PTE_V;
               printf("mappages: remap detected at va=0x%p "
                      "old_pa=0x%p new_pa=0x%p\n",
                      a, PTE2PA(*pte), pa);
@@ -230,19 +226,44 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm,
   return 0;
 }
 
+// Remove mappings from a page table. The mappings in
+// the given range must exist. Optionally free the
+// physical memory.
+void uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free) {
+  uint64 a, last;
+  pte_t *pte;
 
-// vm.c
-void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
-  for (uint64 a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-    pte_t *pte = walk(pagetable, a, 0);
-    if (!pte || !(*pte & PTE_V)) {
-      continue; // 跳过无效页表项，避免 panic
-    }
-    if (do_free) {
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
-    }
-    *pte = 0;
+  a = PGROUNDDOWN(va);
+  last = PGROUNDDOWN(va + size - 1);
+
+  for (;;) {
+      if ((pte = walk(pagetable, a, 0)) == 0) {
+          // 页表项不存在，跳过（允许延迟分配或 VMA 区域）
+          if (a == last) break;
+          a += PGSIZE;
+          continue;
+      }
+
+      if ((*pte & PTE_V) == 0) {
+          // 页表项无效，跳过（允许延迟分配或 VMA 区域）
+          if (a == last) break;
+          a += PGSIZE;
+          continue;
+      }
+
+      if (PTE_FLAGS(*pte) == PTE_V) {
+          panic("uvmunmap: not a leaf");
+      }
+
+      if (do_free) {
+          uint64 pa = PTE2PA(*pte);
+          kfree((void*)pa);
+      }
+
+      *pte = 0; // 清除页表项
+
+      if (a == last) break;
+      a += PGSIZE;
   }
 }
 
@@ -350,24 +371,6 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-// vm.c
-
-// 检查虚拟地址是否属于私有映射（MAP_PRIVATE）
-int 
-is_private_mapping(pagetable_t pagetable, uint64 va) 
-{
-  struct proc *p = myproc();
-  
-  // 遍历 VMA 检查地址是否属于私有映射
-  for (int i = 0; i < NVMA; i++) {
-    struct vma *v = &p->vmas[i];
-    if (v->valid && va >= v->addr && va < v->addr + v->length) {
-      return (v->flags == MAP_PRIVATE);
-    }
-  }
-  return 0; // 不属于任何 VMA 或不是私有映射
-}
-
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -376,23 +379,53 @@ is_private_mapping(pagetable_t pagetable, uint64 va)
 // frees any allocated pages on failure.
 
 int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz) {
-  for (uint64 i = 0; i < sz; i += PGSIZE) {
-    pte_t *pte = walk(old, i, 0);
-    if (!pte || !(*pte & PTE_V)) continue;
-    
-    // 对私有映射标记 COW
-    if (is_private_mapping(old, i)) { 
-      *pte &= ~PTE_W;
-      *pte |= PTE_COW;
-      krefinc((void*)PTE2PA(*pte)); // 增加引用计数
-    }
-    
-    // 复制页表项到子进程
-    mappages(new, i, PGSIZE, PTE2PA(*pte), PTE_FLAGS(*pte), 1);
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  char *mem;
+  struct proc *p = myproc();
+
+  for (i = 0; i < sz; i += PGSIZE) {
+      // 检查是否属于 VMA 区域
+      int is_vma = 0;
+      for (int j = 0; j < NVMA; j++) {
+          struct vma *v = &p->vmas[j];
+          if (v->valid && i >= v->addr && i < v->addr + v->length) {
+              is_vma = 1;
+              break;
+          }
+      }
+
+      if (is_vma) {
+          // 标记为只读以启用 COW
+          pte_t *pte = walk(old, i, 0);
+          if (pte && (*pte & PTE_V)) {
+              *pte &= ~PTE_W;
+          }
+          continue;
+      }
+
+      // 处理非 VMA 页
+      if ((pte = walk(old, i, 0)) == 0) continue;
+      if ((*pte & PTE_V) == 0) continue;
+
+      pa = PTE2PA(*pte);
+      flags = PTE_FLAGS(*pte);
+
+      if ((mem = kalloc()) == 0) goto err;
+      memmove(mem, (char*)pa, PGSIZE);
+
+      if (mappages(new, i, PGSIZE, (uint64)mem, flags, 0) != 0) {
+          kfree(mem);
+          goto err;
+      }
   }
   return 0;
-}
 
+err:
+  uvmunmap(new, 0, i, 1);
+  return -1;
+}
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.

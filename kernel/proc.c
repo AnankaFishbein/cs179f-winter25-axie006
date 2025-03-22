@@ -283,10 +283,10 @@ fork(void)
   // 复制 VMA
   for (int i = 0; i < NVMA; i++) {
     if (p->vmas[i].valid) {
-      np->vmas[i] = p->vmas[i];
-      np->vmas[i].file = filedup(p->vmas[i].file); // 增加文件引用计数
+        np->vmas[i] = p->vmas[i];
+        filedup(np->vmas[i].file); // 增加文件引用计数
     }
-  }
+}
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -332,6 +332,16 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
+
+  // 解除所有 VMA 映射
+  for (int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->valid) {
+        uvmunmap(p->pagetable, v->addr, v->length / PGSIZE, 1);
+        fileclose(v->file);
+        v->valid = 0;
+    }
+}
 
   if(p == initproc){
     panic("init exiting");
@@ -385,15 +395,6 @@ exit(int status)
   p->state = ZOMBIE;
 
   release(&original_parent->lock);
-
-  for (int i = 0; i < NVMA; i++) {
-    struct vma *v = &p->vmas[i];
-    if (v->valid) {
-      uvmunmap(p->pagetable, v->addr, v->length, 1);
-      fileclose(v->file);
-      v->valid = 0;
-    }
-  }
 
   // Jump into the scheduler, never to return.
   sched();

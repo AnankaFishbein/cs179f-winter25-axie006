@@ -40,134 +40,100 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
-// Handle traps from user space
-void 
+void
 usertrap(void)
 {
   int which_dev = 0;
-  struct proc *p = myproc();
 
-  // 确保陷阱来自用户态
-  if ((r_sstatus() & SSTATUS_SPP) != 0)
+  if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // 设置陷阱处理函数为内核态处理逻辑
+  // send interrupts and exceptions to kerneltrap(),
+  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  // 保存用户程序计数器
-  p->tf->epc = r_sepc();
-
-  // 处理系统调用
-  if (r_scause() == 8) {
-    if (p->killed)
-      exit(-1);
-    
-    // 系统调用处理
-    p->tf->epc += 4;
-    intr_on();
-    syscall();
+  struct proc *p = myproc();
   
+  // save user program counter.
+  p->tf->epc = r_sepc();
+  
+  if(r_scause() == 8){
+    // system call
+
+    if(p->killed)
+      exit(-1);
+
+    // sepc points to the ecall instruction,
+    // but we want to return to the next instruction.
+    p->tf->epc += 4;
+
+    // an interrupt will change sstatus &c registers,
+    // so don't enable until done with those registers.
+    intr_on();
+
+    syscall();
   } 
-  // 处理页面错误（13: Load Page Fault, 15: Store/AMO Page Fault）
-  else if (r_scause() == 13 || r_scause() == 15) {
+  else if(r_scause() == 15 || r_scause() == 13){
     uint64 va = r_stval();
-    pte_t *pte;
-    uint flags;
-    char *mem;
+        struct proc *p = myproc();
 
-    // 1. 检查地址是否在进程地址空间内
-    if (va >= p->sz || va < p->tf->sp) {
-      p->killed = 1;
-      goto exit;
-    }
-
-    // 2. 查找对应的 VMA（内存映射区域）
-    struct vma *vma = 0;
-    for (int i = 0; i < NVMA; i++) {
-      if (p->vmas[i].valid && va >= p->vmas[i].addr && 
-          va < p->vmas[i].addr + p->vmas[i].length) {
-        vma = &p->vmas[i];
-        break;
-      }
-    }
-
-    // 3. 处理 COW（写时复制）页面
-    pte = walk(p->pagetable, va, 0);
-    if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
-      // 分配新物理页
-      if ((mem = kalloc()) == 0) {
-        p->killed = 1;
-        goto exit;
-      }
-      // 复制旧页内容
-      memmove(mem, (char*)PTE2PA(*pte), PGSIZE);
-      // 设置新页权限：可写，清除 COW 标记
-      flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
-      // 释放旧页（减少引用计数）
-      kfree((void*)PTE2PA(*pte));
-      // 映射新页
-      *pte = PA2PTE((uint64)mem) | flags;
-      goto exit;
-    }
-
-    // 4. 处理内存映射文件（首次访问）
-    if (vma) {
-      mem = kalloc();
-      if (!mem) {
-        p->killed = 1;
-        goto exit;
-      }
-      memset(mem, 0, PGSIZE);
-
-      // 从文件读取数据
-      ilock(vma->file->ip);
-      readi(vma->file->ip, 0, (uint64)mem, va - vma->addr, PGSIZE);
-      iunlock(vma->file->ip);
-
-      // 设置页表权限
-      flags = PTE_U;
-      if (vma->prot & PROT_READ) flags |= PTE_R;
-      if (vma->prot & PROT_WRITE) {
-        if (vma->flags == MAP_SHARED) {
-          flags |= PTE_W; // 共享映射直接可写
-        } else {
-          flags |= PTE_R | PTE_COW; // 私有映射标记为 COW
+        // 1. 检查是否属于 VMA
+        struct vma *vma = NULL; //null??
+        for (int i = 0; i < NVMA; i++) {
+            if (p->vmas[i].valid && va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].length) {
+                vma = &p->vmas[i];
+                break;
+            }
         }
-      }
+        if (!vma) {
+            p->killed = 1;
+            exit(-1);
+        }
 
-      // 映射到页表
-      if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, 
-                  (uint64)mem, flags, 1) != 0) {
-        kfree(mem);
-        p->killed = 1;
-      }
-    } else {
-      p->killed = 1; // 无对应 VMA，终止进程
-    }
-  } 
-  // 处理设备中断
-  else if ((which_dev = devintr()) != 0) {
-    // 设备中断处理
-  } 
-  // 未知陷阱类型
-  else {
-    printf("usertrap(): unexpected scause %p (%s) pid=%d\n", 
-           r_scause(), scause_desc(r_scause()), p->pid);
+        // 2. 分配物理页并读取文件
+        char *mem = kalloc();
+        memset(mem, 0, PGSIZE);
+        uint64 offset = va - vma->addr;
+        ilock(vma->file->ip);
+        readi(vma->file->ip, 0, (uint64)mem, offset, PGSIZE);
+        iunlock(vma->file->ip);
+
+        // 3. 设置页表权限
+        int perm = PTE_U;
+        if (vma->prot & PROT_READ) perm |= PTE_R;
+        if (vma->prot & PROT_WRITE) {
+            if (vma->flags == MAP_SHARED) {
+                perm |= PTE_W | PTE_D; // 允许直接写入并标记脏页
+            } else {
+                perm |= PTE_R; // 私有映射初始为只读（后续 COW）
+            }
+        }
+
+        // 4. 映射到页表
+        if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm, 1) != 0) {
+            kfree(mem);
+            p->killed = 1;
+        }
+
+  }
+  else if((which_dev = devintr()) != 0){
+    // ok
+  } else {
+    printf("usertrap(): unexpected scause %p (%s) pid=%d\n", r_scause(), scause_desc(r_scause()), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-exit:
-  if (p->killed)
+  if(p->killed)
     exit(-1);
 
-  // 如果是时钟中断，让出 CPU
-  if (which_dev == 2)
+  // give up the CPU if this is a timer interrupt.
+  if(which_dev == 2)
     yield();
 
-  // 返回用户态
   usertrapret();
 }
+
 int handle_mmap_fault(struct proc *p, uint64 va) {
   struct vma *target_vma = 0;
 
